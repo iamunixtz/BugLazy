@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+import argparse
+import subprocess
+import os
+import sys
+import getpass
+import shutil
+from colorama import init, Fore, Style
+
+# Initialize colorama for colored output
+init(autoreset=True)
+
+def print_banner():
+    banner = f"""{Fore.GREEN}
+ _____         __                
+| __  |_ _ ___|  |   ___ ___ _ _ 
+| __ -| | | . |  |__| .'|- _| | |
+|_____|___|_  |_____|__,|___|_|
+          |___|             |___|   v1.0   by bughunter
+"""
+    print(banner)
+
+def run_command(cmd, log_prefix="", shell=False):
+    """
+    Runs a command printing its log output.
+    """
+    if log_prefix:
+        print(f"{Fore.YELLOW}[+] {log_prefix}{Style.RESET_ALL}")
+    try:
+        proc = subprocess.Popen(cmd, shell=shell)
+        proc.communicate()
+        if proc.returncode != 0:
+            print(f"{Fore.RED}[-] Command failed: {cmd}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[-] Exception running command: {cmd}\n{e}{Style.RESET_ALL}")
+
+def count_file_lines(filename):
+    try:
+        with open(filename, "r") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return len(lines)
+    except FileNotFoundError:
+        return 0
+
+def main():
+    print_banner()
+
+    parser = argparse.ArgumentParser(description="Automated bug hunting tool")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-d", "--domain", help="Single domain to scan")
+    group.add_argument("-l", "--list", help="File containing list of domains")
+    args = parser.parse_args()
+
+    # Step 1: Hunting for subdomains
+    if args.domain:
+        cmd = f"subdominator -d {args.domain} -o subdomains.txt"
+    else:
+        cmd = f"subdominator -dL {args.list} -o subdomains.txt"
+    
+    run_command(cmd, log_prefix="Hunting for subdomains", shell=True)
+
+    # If no subdomains found, use the input domain(s) for subsequent steps.
+    subdomains_count = count_file_lines("subdomains.txt")
+    if subdomains_count == 0:
+        print(f"{Fore.YELLOW}[+] No subdomains found. Using input domain(s) for the next steps.{Style.RESET_ALL}")
+        if args.domain:
+            with open("subdomains.txt", "w") as f:
+                f.write(args.domain + "\n")
+        elif args.list:
+            shutil.copy(args.list, "subdomains.txt")
+        subdomains_count = count_file_lines("subdomains.txt")
+
+    print(f"{Fore.YELLOW}[+] Subdomains total: {subdomains_count}{Style.RESET_ALL}")
+
+    # Step 2: Finding alive domains using httpx-toolkit
+    httpx_ports = "80,443,8080,8000,8888,8443,10000,5900,9200,11211,3000,5000,7000,9000,9001"
+    cmd = f"httpx-toolkit -list subdomains.txt -ports {httpx_ports} -threads 200 -o alivesubs.txt"
+    run_command(cmd, log_prefix="Finding alive domains", shell=True)
+
+    alive_sub_count = count_file_lines("alivesubs.txt")
+    print(f"{Fore.YELLOW}[+] Alive subdomains: {alive_sub_count}{Style.RESET_ALL}")
+
+    # Step 3: Hunting for alive URLs using katana
+    cmd = ("katana -list alivesubs.txt -o output.txt -depth 3 -rl 150 -c 10 "
+           "-js-crawl -timeout 10 -retry 3 -verbose")
+    run_command(cmd, log_prefix="Hunting for alive URLs", shell=True)
+
+    # Step 4: Cleaning output file (extract URLs)
+    cmd = r"cat output.txt | grep -oP '(http[s]?://[^\s]+)' | tee urls.txt"
+    run_command(cmd, log_prefix="Cleaning output file", shell=True)
+
+    urls_count = count_file_lines("urls.txt")
+    print(f"{Fore.YELLOW}[+] Total cleans urls: {urls_count}{Style.RESET_ALL}")
+
+    # Step 5: Analyzing JS file links
+    cmd = r'cat urls.txt | grep -E "\.js($|\?)" | tee jsurls.txt'
+    run_command(cmd, log_prefix="Analyzing JS file links", shell=True)
+
+    js_urls_count = count_file_lines("jsurls.txt")
+    print(f"{Fore.YELLOW}[+] JS urls: {js_urls_count}{Style.RESET_ALL}")
+
+    # Step 6: Hunting for Secrets and API Keys in JS files using jsninja
+    cmd = "jsninja jsurls.txt --secrets"
+    run_command(cmd, log_prefix="Hunting for Secrets and API Keys", shell=True)
+
+    # ----- New Features Added Below -----
+
+    # Step 7: Hunting Parameters for XSS
+    run_command("cat urls.txt | gf xss | tee xssparameters.txt", log_prefix="Hunting Parameters for XSS", shell=True)
+    xss_params_count = count_file_lines("xssparameters.txt")
+    print(f"{Fore.YELLOW}[+] Total XSS parameters: {xss_params_count}{Style.RESET_ALL}")
+
+    # Step 8: Hunting for SQLi parameters
+    run_command("cat urls.txt | gf sqli | uro | tee sqliparameters.txt", log_prefix="Hunting for SQLi parameters", shell=True)
+    sqli_params_count = count_file_lines("sqliparameters.txt")
+    print(f"{Fore.YELLOW}[+] Total SQLi parameters: {sqli_params_count}{Style.RESET_ALL}")
+
+    # Step 9: Hunting Bugs Old School - collecting old URLs via gau
+    run_command("cat alivesubs.txt | gau | tee oldurls.txt", log_prefix="Hunting Bugs Old School", shell=True)
+    old_urls_count = count_file_lines("oldurls.txt")
+    print(f"{Fore.YELLOW}[+] Old Urls: {old_urls_count}{Style.RESET_ALL}")
+
+    # Step 10: Analyzing Old JS urls
+    run_command(r"cat oldurls.txt | grep -E '\.js($|\?)' | tee oldjsurls.txt", log_prefix="Analyzing Old JS urls", shell=True)
+    old_js_urls_count = count_file_lines("oldjsurls.txt")
+    print(f"{Fore.YELLOW}[+] Old JS urls: {old_js_urls_count}{Style.RESET_ALL}")
+
+    # Step 11: Hunting XSS Parameters Old School
+    run_command("cat oldurls.txt | gf xss | tee oldxssparams.txt", log_prefix="Hunting XSS Parameters Old School", shell=True)
+    old_xss_params_count = count_file_lines("oldxssparams.txt")
+    print(f"{Fore.YELLOW}[+] Old school XSS Params: {old_xss_params_count}{Style.RESET_ALL}")
+
+    # Step 12: Hunting SQLi parameters Old School
+    run_command("cat oldurls.txt | gf sqli | tee oldsqliparams.txt", log_prefix="Hunting SQLi parameters Old School", shell=True)
+    old_sqli_params_count = count_file_lines("oldsqliparams.txt")
+    print(f"{Fore.YELLOW}[+] Old School SQLi Params: {old_sqli_params_count}{Style.RESET_ALL}")
+
+    # Step 13: Hunting Secrets/APIs on Old JS Files using jsninja
+    run_command("jsninja oldjsurls.txt", log_prefix="Hunting Secrets/APIs on Old JS Files", shell=True)
+
+    # Final Step: Print final message with the device's username
+    user = getpass.getuser()
+    print(f"{Fore.GREEN}[+] Happy Hunting OldSchool Hunting Ends {user}{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+    main()
